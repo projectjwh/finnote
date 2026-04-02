@@ -1,0 +1,32 @@
+# Environment
+.env
+.env.*
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Data & outputs (large, regenerable)
+outputs/
+data/
+logs/
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Notebooks
+notebooks/.ipynb_checkpoints/
+.ipynb_checkpoints/
+
+# Pipeline working dirs
+pipeline/
+.pw/
