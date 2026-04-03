@@ -1,0 +1,130 @@
+name: Daily Pipeline & Deploy
+
+on:
+  schedule:
+    # 6:30 AM ET (11:30 UTC), weekdays only
+    - cron: '30 11 * * 1-5'
+  workflow_dispatch:
+
+# Only allow one pipeline run at a time; cancel in-progress if re-triggered
+concurrency:
+  group: daily-pipeline
+  cancel-in-progress: true
+
+# Permissions needed for GitHub Pages deployment
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # ── Setup ──────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      # ── Data Collection ────────────────────────────────────
+      - name: Collect FRED data
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python -m finnote.datastore.fred_collector
+
+      - name: Collect extended data sources
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python -m finnote.datastore.extended_collectors
+
+      # ── Pipeline Run (mock mode — no ANTHROPIC_API_KEY) ────
+      - name: Run pipeline
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python -m finnote run
+
+      # ── Post-Pipeline Artifacts ────────────────────────────
+      - name: Generate FRED dashboard charts
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python -m finnote.datastore.category_charts
+
+      - name: Rebuild manifest
+        run: python -m finnote.datastore.build_manifest
+
+      # ── Root redirect ──────────────────────────────────────
+      - name: Create root index.html redirect
+        run: |
+          cat > outputs/index.html << 'REDIRECT'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta http-equiv="refresh" content="0; url=app/index.html">
+            <title>finnote — Redirecting</title>
+          </head>
+          <body>
+            <p>Redirecting to <a href="app/index.html">finnote dashboard</a>...</p>
+          </body>
+          </html>
+          REDIRECT
+
+      # ── Tests ──────────────────────────────────────────────
+      - name: Run tests
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: pytest tests/ -v
+
+      # ── Discord Notification ───────────────────────────────
+      - name: Post to Discord
+        if: always()
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "DISCORD_WEBHOOK_URL not set, skipping notification"
+            exit 0
+          fi
+          # Read the first 1800 chars of daily report (Discord limit is 2000)
+          REPORT=$(head -c 1800 outputs/*/daily_report.md 2>/dev/null || echo "Pipeline completed — $(date -u '+%Y-%m-%d %H:%M UTC')")
+          # Escape special JSON characters
+          REPORT=$(echo "$REPORT" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read())[1:-1])')
+          curl -sf -X POST "$DISCORD_WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "{\"content\": \"## finnote Daily Coverage\\n\\n${REPORT}\\n\\n[View Dashboard](https://projectjwh.github.io/finnote/)\"}"
+
+      # ── GitHub Pages Deployment ────────────────────────────
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: outputs/
+
+  deploy:
+    needs: pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      pages: write
+      id-token: write
+
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
