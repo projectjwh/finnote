@@ -550,8 +550,14 @@ def build_manifest():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(manifest, indent=2))
 
-    # Auto-embed manifest into index.html so it works without a server (file:// friendly)
+    # Copy dashboard template from source to outputs/app/ (source of truth for SPA)
+    template_path = Path(__file__).parent / "templates" / "dashboard.html"
     index_path = OUTPUTS / "app" / "index.html"
+    if template_path.exists():
+        import shutil
+        shutil.copy2(template_path, index_path)
+
+    # Auto-embed manifest into index.html so it works without a server (file:// friendly)
     if index_path.exists():
         html = index_path.read_text(encoding="utf-8")
         manifest_json = json.dumps(manifest)
