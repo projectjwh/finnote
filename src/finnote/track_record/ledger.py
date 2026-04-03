@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -238,6 +238,44 @@ class TrackRecordLedger:
             (run_date,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_previous_day_findings(self, current_date: str) -> list[dict[str, Any]]:
+        """Return all findings from the most recent run before current_date."""
+        # Find the most recent run_date strictly before current_date
+        row = self.conn.execute(
+            "SELECT MAX(run_date) AS max_date FROM daily_findings WHERE run_date < ?",
+            (current_date,),
+        ).fetchone()
+        if row is None or row["max_date"] is None:
+            return []
+        prev_date = row["max_date"]
+        rows = self.conn.execute(
+            "SELECT * FROM daily_findings WHERE run_date = ? ORDER BY priority_score DESC",
+            (prev_date,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_findings(self, days: int = 7) -> list[dict[str, Any]]:
+        """Return all findings from the last N days."""
+        cutoff = (
+            datetime.now(timezone.utc).date() - timedelta(days=days)
+        ).isoformat()
+        rows = self.conn.execute(
+            "SELECT * FROM daily_findings WHERE run_date >= ? ORDER BY run_date DESC, priority_score DESC",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_finding_subjects_recent(self, days: int = 3) -> set[str]:
+        """Return just subject strings from recent days for fast dedup."""
+        cutoff = (
+            datetime.now(timezone.utc).date() - timedelta(days=days)
+        ).isoformat()
+        rows = self.conn.execute(
+            "SELECT DISTINCT subject FROM daily_findings WHERE run_date >= ?",
+            (cutoff,),
+        ).fetchall()
+        return {row["subject"] for row in rows}
 
     # ------------------------------------------------------------------
     # Featured Coverages

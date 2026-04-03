@@ -430,6 +430,72 @@ def _scan_pipeline_runs() -> dict | None:
     }
 
 
+def _scan_morning_brief() -> str | None:
+    """Find the latest morning_brief.html across pipeline runs."""
+    # Scan all YYYYMMDD_HHMMSS dirs in outputs/ (most recent first)
+    run_dirs = sorted(
+        [d for d in OUTPUTS.iterdir() if d.is_dir() and re.match(r"\d{8}_\d{6}", d.name)],
+        reverse=True,
+    )
+    for d in run_dirs:
+        brief = d / "morning_brief.html"
+        if brief.exists():
+            return f"../{d.name}/morning_brief.html"
+    return None
+
+
+def _scan_live_coverages() -> list[dict]:
+    """Read active LIVE coverages from the track record database."""
+    try:
+        from finnote.track_record.ledger import TrackRecordLedger
+        ledger = TrackRecordLedger()
+        active = ledger.get_active_coverages()
+        ledger.close()
+    except Exception:
+        return []
+
+    if not active:
+        return []
+
+    # Find the most recent pipeline run directory for timeline HTML lookup
+    run_dirs = sorted(
+        [d for d in OUTPUTS.iterdir() if d.is_dir() and re.match(r"\d{8}_\d{6}", d.name)],
+        reverse=True,
+    )
+
+    results: list[dict] = []
+    for cov in active:
+        coverage_id = cov.get("coverage_id", "")
+        title = cov.get("title", "Unknown")
+        status = cov.get("status", "active")
+        last_updated = cov.get("last_updated", "")
+
+        # Search for timeline HTML in most recent run dirs
+        timeline_path: str | None = None
+        safe_id = coverage_id.replace("/", "_").replace("\\", "_")
+        for d in run_dirs:
+            for candidate in [
+                d / f"live_{safe_id}.html",
+                d / f"timeline_{safe_id}.html",
+                d / f"{safe_id}_timeline.html",
+            ]:
+                if candidate.exists():
+                    timeline_path = f"../{d.name}/{candidate.name}"
+                    break
+            if timeline_path:
+                break
+
+        results.append({
+            "coverage_id": coverage_id,
+            "title": title,
+            "status": status,
+            "last_updated": last_updated,
+            "timeline_path": timeline_path,
+        })
+
+    return results
+
+
 def build_manifest():
     """Build the full manifest.json from all output directories."""
     sections = []
@@ -475,6 +541,8 @@ def build_manifest():
         "generated": datetime.now().isoformat(),
         "total_charts": total_charts,
         "db_summary": db_summary,
+        "morning_brief_path": _scan_morning_brief(),
+        "live_coverages": _scan_live_coverages(),
         "sections": sections,
     }
 

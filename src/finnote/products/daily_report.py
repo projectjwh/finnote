@@ -858,6 +858,45 @@ def _build_debate_summary(messages: list[AgentMessage]) -> str:
     return "\n\n".join(lines)
 
 
+def _build_whats_new_section(delta_results) -> str:
+    """Build a 'What's New Today' section using delta detection results."""
+    if not delta_results:
+        return ""
+
+    lines = ["## What's New Today\n"]
+
+    # Group by delta_type
+    new_items = [d for d in delta_results if d.delta_type == "new"]
+    escalations = [d for d in delta_results if d.delta_type == "escalation"]
+    reversals = [d for d in delta_results if d.delta_type == "reversal"]
+    continuations = [d for d in delta_results if d.delta_type == "continuation"]
+
+    if new_items:
+        lines.append(f"**New signals ({len(new_items)}):**\n")
+        for d in new_items[:5]:
+            lines.append(f"- {d.finding.subject} ({d.delta_explanation})")
+        lines.append("")
+
+    if escalations:
+        lines.append(f"**Escalating ({len(escalations)}):**\n")
+        for d in escalations[:3]:
+            lines.append(f"- {d.finding.subject} ({d.delta_explanation})")
+        lines.append("")
+
+    if reversals:
+        lines.append(f"**Reversals ({len(reversals)}):**\n")
+        for d in reversals[:3]:
+            lines.append(f"- {d.finding.subject} ({d.delta_explanation})")
+        lines.append("")
+
+    if continuations:
+        themes = set(d.finding.theme or "general" for d in continuations)
+        lines.append(f"**Still watching:** {', '.join(themes)}\n")
+
+    lines.append("---\n")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -893,10 +932,14 @@ def generate_daily_report(
     if isinstance(yields_data, dict) and "error" not in yields_data:
         instrument_count += len([v for v in yields_data.values() if v is not None])
 
+    # Extract delta results stored by the pipeline's Phase 10 hook
+    delta_results = market_data.get("_delta_results", [])
+
     # Build each section with try/except so one failure doesn't kill the report
     sections: dict[str, str] = {}
     section_builders = [
         ("snapshot", lambda: _build_market_snapshot(market_data)),
+        ("whats_new", lambda: _build_whats_new_section(delta_results)),
         ("equities", lambda: _build_equity_section(market_data)),
         ("rates", lambda: _build_rates_section(market_data)),
         ("credit", lambda: _build_credit_section(market_data)),
@@ -925,7 +968,7 @@ def generate_daily_report(
 
 {sections.get("snapshot", "Unavailable.")}
 
----
+{sections.get("whats_new", "")}
 
 ## Why These Highlights
 

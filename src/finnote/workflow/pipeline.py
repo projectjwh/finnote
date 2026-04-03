@@ -190,6 +190,15 @@ class Pipeline:
             console.print(
                 f"  [green]Track record:[/] {len(open_calls)} open calls loaded"
             )
+
+            # Load yesterday's findings for delta detection
+            from datetime import date
+            today_str = date.today().isoformat()
+            yesterday_findings = self.ledger.get_previous_day_findings(today_str)
+            self.market_data["_yesterday_findings"] = yesterday_findings
+            recent_subjects = self.ledger.get_finding_subjects_recent(days=3)
+            self.market_data["_recent_subjects"] = list(recent_subjects)
+            console.print(f"  [green]Delta context:[/] {len(yesterday_findings)} yesterday findings, {len(recent_subjects)} recent subjects")
         except Exception as exc:
             console.print(
                 f"[yellow]  Warning: Failed to initialize track record: {exc}[/]"
@@ -215,6 +224,8 @@ class Pipeline:
                 await self._hook_signal_validation(round_messages)
             case "review_and_select":
                 await self._hook_review_and_select(round_messages)
+            case "featured_coverage":
+                await self._hook_featured_coverage(round_messages)
             case "editorial_production":
                 await self._hook_editorial_production(round_messages)
 
@@ -279,6 +290,7 @@ class Pipeline:
             run_date = datetime.now(timezone.utc).date().isoformat()
             archived_count = 0
             published_count = 0
+            all_findings: list[DailyFinding] = []
 
             # Archive all findings from the full message log.
             # Every analysis-type message becomes a DailyFinding.
@@ -310,6 +322,7 @@ class Pipeline:
                     ),
                 )
                 self.ledger.archive_finding(finding)
+                all_findings.append(finding)
                 archived_count += 1
 
             # Publish approved research calls (those marked as validated)
@@ -324,11 +337,127 @@ class Pipeline:
                 f"  [green]Archive:[/] {archived_count} findings archived, "
                 f"{published_count} research calls published"
             )
+
+            # Delta filter: score novelty and log
+            try:
+                from finnote.products.delta_detector import filter_for_freshness, DeltaResult
+                yesterday = self.market_data.get("_yesterday_findings", [])
+                if yesterday:
+                    delta_results = filter_for_freshness(
+                        all_findings,
+                        yesterday,
+                        self.market_data,
+                    )
+                    new_count = sum(1 for d in delta_results if d.delta_type == "new")
+                    esc_count = sum(1 for d in delta_results if d.delta_type == "escalation")
+                    cont_count = sum(1 for d in delta_results if d.delta_type == "continuation")
+                    console.print(
+                        f"  [green]Delta:[/] {new_count} new, {esc_count} escalating, "
+                        f"{cont_count} continuing, {len(all_findings) - len(delta_results)} filtered as stale"
+                    )
+                    self.market_data["_delta_results"] = delta_results
+            except Exception as exc:
+                logger.debug("Delta detection failed: %s", exc)
         except Exception as exc:
             console.print(
                 f"[yellow]  Warning: Review/archive hook failed: {exc}[/]"
             )
             logger.debug("Review and select hook error", exc_info=True)
+
+    async def _hook_featured_coverage(self, round_messages: list[AgentMessage]) -> None:
+        """Phase 11 hook: detect and update LIVE stories."""
+        if self.ledger is None:
+            return
+        try:
+            from datetime import date
+
+            from finnote.products.live_coverage import LiveCoverageManager, _dict_to_coverage
+
+            manager = LiveCoverageManager(self.ledger)
+
+            # Get existing active coverages (as dicts) and convert to models
+            active_dicts = self.ledger.get_active_coverages()
+            active = [_dict_to_coverage(d) for d in active_dicts]
+
+            # Get today's findings from the archive
+            today_str = date.today().isoformat()
+            today_findings_raw = self.ledger.get_findings_by_date(today_str)
+            # Convert raw dicts to DailyFinding objects
+            today_findings = [self._dict_to_finding(f) for f in today_findings_raw]
+
+            # Detect new LIVE themes
+            new_coverages = manager.detect_live_themes(
+                today_findings, self.market_data, active,
+            )
+            for cov in new_coverages:
+                self.ledger.upsert_featured_coverage(cov)
+                console.print(f"  [red]LIVE[/] New coverage: {cov.title}")
+
+            # Update existing coverages with new matching findings
+            all_active = active + new_coverages
+            updated = manager.update_active_coverages(
+                all_active, today_findings, [], self.run_id,
+            )
+            for cov in updated:
+                self.ledger.upsert_featured_coverage(cov)
+                # Check for conclusion
+                if manager.check_for_conclusion(cov, self.market_data):
+                    cov.status = "dormant"
+                    self.ledger.upsert_featured_coverage(cov)
+                    console.print(
+                        f"  [yellow]DORMANT[/] Coverage concluded: {cov.title}"
+                    )
+
+            # Render timelines for still-active coverages
+            output_dir = Path("outputs") / self.run_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            for cov in [c for c in all_active if c.status == "active"]:
+                timeline_html = manager.render_live_timeline(cov)
+                timeline_path = output_dir / f"live_{cov.coverage_id}.html"
+                timeline_path.write_text(timeline_html, encoding="utf-8")
+                console.print(f"  [green]Timeline:[/] {timeline_path}")
+
+            # Store active coverages for morning brief
+            self.market_data["_live_coverages"] = [
+                c for c in all_active if c.status == "active"
+            ]
+
+            console.print(
+                f"  [green]LIVE coverage:[/] {len(new_coverages)} new, "
+                f"{len(updated)} updated, "
+                f"{len(all_active)} total active"
+            )
+        except Exception as exc:
+            console.print(
+                f"[yellow]  Warning: LIVE coverage hook failed: {exc}[/]"
+            )
+            logger.debug("LIVE coverage hook error", exc_info=True)
+
+    @staticmethod
+    def _dict_to_finding(row: dict) -> DailyFinding:
+        """Convert a SQLite row dict into a DailyFinding model."""
+        import json
+
+        tags_raw = row.get("tags", "[]")
+        tags = json.loads(tags_raw) if isinstance(tags_raw, str) else (tags_raw or [])
+        rc_raw = row.get("research_calls", "[]")
+        research_calls = json.loads(rc_raw) if isinstance(rc_raw, str) else (rc_raw or [])
+
+        return DailyFinding(
+            finding_id=row["finding_id"],
+            date=row.get("run_date", row.get("date", "")),
+            source_agent_id=row["source_agent_id"],
+            source_team=row["source_team"],
+            subject=row["subject"],
+            body=row["body"],
+            priority_score=row.get("priority_score", 5),
+            status=row.get("status", "archived"),
+            selection_reason=row.get("selection_reason"),
+            research_calls=research_calls,
+            tags=tags,
+            region=row.get("region"),
+            theme=row.get("theme"),
+        )
 
     async def _hook_editorial_production(self, round_messages: list[AgentMessage]) -> None:
         """Phase 12 hook: assemble dashboard visualizations and save output."""
@@ -371,6 +500,36 @@ class Pipeline:
                 f"[yellow]  Warning: Daily report generation failed: {exc}[/]"
             )
             logger.debug("Daily report generation error", exc_info=True)
+
+        # Generate morning brief
+        try:
+            from finnote.products.morning_brief import MorningBriefGenerator
+            news_articles = self.market_data.get("news_articles", [])
+            delta_results = self.market_data.get("_delta_results", [])
+            live_coverages: list = []  # Will be populated when LIVE coverage is implemented
+            if hasattr(self, 'ledger') and self.ledger:
+                try:
+                    live_coverages = self.ledger.get_active_coverages()
+                except Exception:
+                    pass
+
+            brief_gen = MorningBriefGenerator(
+                market_data=self.market_data,
+                messages=self.message_log,
+                run_id=self.run_id,
+                delta_results=delta_results,
+                live_coverages=live_coverages,
+                news_articles=news_articles,
+            )
+            brief_html = brief_gen.generate()
+            output_dir = Path("outputs") / self.run_id
+            output_dir.mkdir(parents=True, exist_ok=True)
+            brief_path = output_dir / "morning_brief.html"
+            brief_path.write_text(brief_html, encoding="utf-8")
+            console.print(f"  [green]Morning brief:[/] {brief_path}")
+        except Exception as exc:
+            console.print(f"[yellow]  Warning: Morning brief generation failed: {exc}[/]")
+            logger.debug("Morning brief error", exc_info=True)
 
     # ------------------------------------------------------------------
     # Data loading

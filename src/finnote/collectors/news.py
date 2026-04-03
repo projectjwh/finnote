@@ -15,6 +15,48 @@ import httpx
 from finnote.collectors.sources import SourceTier, get_source_weight
 
 
+# ---------------------------------------------------------------------------
+# Keyword → instrument mapping for news-data pairing
+# ---------------------------------------------------------------------------
+
+KEYWORD_TO_INSTRUMENT: dict[str, list[str]] = {
+    # Energy
+    "oil": ["WTI Crude", "Brent Crude"], "crude": ["WTI Crude", "Brent Crude"],
+    "opec": ["WTI Crude", "Brent Crude"], "natural gas": ["Natural Gas"],
+    "lng": ["Natural Gas"],
+    # Metals
+    "gold": ["Gold"], "silver": ["Silver"], "copper": ["Copper"],
+    "platinum": ["Platinum"],
+    # Central banks
+    "fed": ["DGS2", "DGS10", "T10Y2Y", "DFF"], "federal reserve": ["DGS2", "DGS10", "DFF"],
+    "ecb": ["EUR/USD", "DGS10"], "boj": ["USD/JPY", "Nikkei 225"],
+    "pboc": ["Shanghai Comp", "USD/CNY"],
+    # Macro
+    "inflation": ["T5YIE", "T10YIE", "CPIAUCSL"], "cpi": ["CPIAUCSL", "T5YIE"],
+    "jobs": ["PAYEMS", "UNRATE", "ICSA"], "unemployment": ["UNRATE", "ICSA"],
+    "gdp": ["GDP", "S&P 500"], "recession": ["T10Y2Y", "SAHMREALTIME", "ICSA"],
+    "rate cut": ["DGS2", "DFF"], "rate hike": ["DGS2", "DFF"],
+    # Regions
+    "china": ["Shanghai Comp", "Hang Seng", "USD/CNY", "Copper"],
+    "japan": ["Nikkei 225", "USD/JPY"], "europe": ["STOXX 600", "EUR/USD"],
+    "emerging": ["Bovespa", "Sensex", "DXY"],
+    # Policy
+    "tariff": ["Shanghai Comp", "DXY", "S&P 500"], "sanctions": ["WTI Crude", "Gold", "DXY"],
+    "war": ["WTI Crude", "Gold", "VIX"], "geopolitical": ["VIX", "Gold", "WTI Crude"],
+    # Market
+    "earnings": ["S&P 500", "VIX", "NASDAQ"], "ipo": ["NASDAQ"],
+    "volatility": ["VIX"], "vix": ["VIX"],
+    "treasury": ["DGS10", "DGS2", "T10Y2Y"], "bond": ["DGS10", "DGS30"],
+    "dollar": ["DXY"], "euro": ["EUR/USD"], "yen": ["USD/JPY"], "yuan": ["USD/CNY"],
+    "bitcoin": ["VIX"], "crypto": ["VIX"],
+    "credit": ["BAMLC0A4CBBB", "BAMLH0A0HYM2"],
+    "housing": ["HOUST", "MORTGAGE30US", "CSUSHPINSA"],
+    "retail": ["RSXFS", "S&P 500"],
+    "tech": ["NASDAQ"],
+    "bank": ["S&P 500", "BAMLC0A4CBBB"],
+}
+
+
 # RSS feeds for financial news (free, no API key needed)
 RSS_FEEDS: list[dict[str, Any]] = [
     {"name": "Reuters Business", "url": "https://www.reutersagency.com/feed/?taxonomy=best-sectors&post_type=best", "tier": SourceTier.TIER_2_WIRE},
@@ -57,6 +99,16 @@ class NewsCollector:
             "news_article_count": len(all_articles),
         }
 
+    @staticmethod
+    def _extract_instruments(title: str) -> list[str]:
+        """Extract relevant instrument identifiers from a headline."""
+        title_lower = title.lower()
+        instruments: set[str] = set()
+        for keyword, insts in KEYWORD_TO_INSTRUMENT.items():
+            if keyword in title_lower:
+                instruments.update(insts)
+        return list(instruments)
+
     async def _fetch_feed(self, feed_config: dict[str, Any]) -> list[dict[str, Any]]:
         """Fetch and parse a single RSS feed."""
         resp = await self.client.get(feed_config["url"])
@@ -64,14 +116,16 @@ class NewsCollector:
 
         articles = []
         for entry in feed.entries[:20]:  # max 20 per feed
+            title = entry.get("title", "")
             articles.append({
-                "title": entry.get("title", ""),
+                "title": title,
                 "summary": entry.get("summary", "")[:500],
                 "link": entry.get("link", ""),
                 "published": entry.get("published", ""),
                 "source": feed_config["name"],
                 "tier": feed_config["tier"],
                 "weight": get_source_weight(feed_config["name"]),
+                "instruments": self._extract_instruments(title),
             })
 
         return articles
